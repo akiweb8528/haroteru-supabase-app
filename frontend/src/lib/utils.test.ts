@@ -79,6 +79,21 @@ describe('sanitizeCallbackUrl', () => {
     expect(sanitizeCallbackUrl('//evil.example.com/phish')).toBe('/subscriptions');
   });
 
+  it.each(['/.//evil.com', '/a/..//evil.com', '/%2e//evil.com', '/%2e%2e//evil.com', '/\n/evil.com'])('正規化で外部遷移になる値を拒否する: %s', (value) => {
+    const result = sanitizeCallbackUrl(value);
+    expect(result).toBe('/subscriptions');
+    expect(new URL(result, 'https://app.example.com').origin).toBe('https://app.example.com');
+  });
+
+  it('安全なドットセグメントは正規化してアプリ内に保つ', () => {
+    expect(sanitizeCallbackUrl('/settings/../subscriptions?tab=all#list')).toBe('/subscriptions?tab=all#list');
+  });
+
+  it('不正な fallback でもアプリ外へ遷移しない', () => {
+    expect(sanitizeCallbackUrl(undefined, '//evil.com')).toBe('/subscriptions');
+    expect(sanitizeCallbackUrl('https://evil.com', '/.//evil.com')).toBe('/subscriptions');
+  });
+
   it('バックスラッシュを含む値は拒否する', () => {
     expect(sanitizeCallbackUrl('/\\evil')).toBe('/subscriptions');
   });
