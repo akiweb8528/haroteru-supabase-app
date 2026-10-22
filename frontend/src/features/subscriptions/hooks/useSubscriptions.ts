@@ -1,310 +1,217 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import useSWR, { mutate } from 'swr';
+import useSWR from 'swr';
 import { useSession } from '@/providers/SessionProvider';
 import type { TrackedSubscription, CreateTrackedSubscriptionInput, UpdateTrackedSubscriptionInput, ListMeta } from '@/types';
 import { subscriptionApi, type SubscriptionListParams } from '@/features/subscriptions/api/subscription-client';
 import { reorderSubscriptionsWithHiddenItems } from '@/features/subscriptions/lib/reorder';
-import {
-  applySubscriptionFilters,
-  buildSubscriptionSummary,
-} from '@/features/subscriptions/lib/subscription-filters';
+import { applySubscriptionFilters, buildSubscriptionSummary } from '@/features/subscriptions/lib/subscription-filters';
 import {
   AUTHENTICATED_SUBSCRIPTIONS_UPDATED_EVENT,
-  clearAuthenticatedPendingOperations,
   emptyAuthenticatedSubscriptionsState,
-  isTemporarySubscriptionId,
   queueAuthenticatedCreate,
   queueAuthenticatedDelete,
   queueAuthenticatedReorder,
   queueAuthenticatedUpdate,
   readAuthenticatedSubscriptionsState,
-  replaceAuthenticatedSubscriptionsFromServer,
-  replaceAuthenticatedTemporaryId,
-  setAuthenticatedSyncError,
-  shiftAuthenticatedPendingOperation,
+  reconcileAuthenticatedSubscriptionsFromServer,
+  resolveAuthenticatedSubscriptionId,
   type AuthenticatedSubscriptionsState,
-  type PendingSubscriptionOperation,
 } from '@/features/subscriptions/lib/authenticated-sync-storage';
+import {
+  AUTHENTICATED_SYNC_ACTIVITY_EVENT,
+  AUTHENTICATED_AUTO_ATTEMPT_LIMIT,
+  isAuthenticatedSyncActive,
+  nextAuthenticatedRetryDelay,
+  syncAuthenticatedSubscriptions,
+  withAuthenticatedStorageLock,
+} from '@/features/subscriptions/lib/authenticated-sync';
 
-const SUBSCRIPTION_KEY = ['subscriptions', 'all'] as const;
+const EMPTY_SUBSCRIPTIONS: TrackedSubscription[] = [];
 
-type SyncState = {
-  pendingCount: number;
-  isSyncing: boolean;
-  syncError: string | null;
-  lastSyncedAt: string | null;
-  isOfflineReady: boolean;
-  isOnline: boolean;
-};
-
-function buildSyncState(state: AuthenticatedSubscriptionsState, isSyncing: boolean, isOnline: boolean): SyncState {
-  return {
-    pendingCount: state.pendingOperations.length,
-    isSyncing,
-    syncError: state.syncError,
-    lastSyncedAt: state.lastSyncedAt,
-    isOfflineReady: state.subscriptions.length > 0 || state.pendingOperations.length > 0,
-    isOnline,
-  };
-}
-
-function resolveErrorMessage(error: unknown): string {
-  if (error instanceof Error && error.message) {
-    return error.message;
-  }
-
-  return '同期に失敗しました。通信が戻ってからもう一度お試しください。';
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : '同期に失敗しました。変更はこの端末に残っています。';
 }
 
 export function useSubscriptions(params: SubscriptionListParams | null = {}) {
   const { user, status } = useSession();
   const userId = user?.id ?? null;
-  const [isOnline, setIsOnline] = useState(true);
-  const [authenticatedState, setAuthenticatedState] = useState<AuthenticatedSubscriptionsState>(emptyAuthenticatedSubscriptionsState());
-  const [isInitialized, setIsInitialized] = useState(false);
-  const [isSyncing, setIsSyncing] = useState(false);
-  const syncInFlightRef = useRef(false);
+  const enabled = Boolean(params !== null && status === 'authenticated' && userId);
+  const currentUserRef = useRef<string | null>(null);
+  currentUserRef.current = enabled ? userId : null;
+  const [isOnline, setIsOnline] = useState(() => typeof navigator === 'undefined' || navigator.onLine);
+  const [stored, setStored] = useState<{ userId: string | null; state: AuthenticatedSubscriptionsState }>({ userId: null, state: emptyAuthenticatedSubscriptionsState() });
+  const [initializedUser, setInitializedUser] = useState<string | null>(null);
+  const [storageError, setStorageError] = useState<string | null>(null);
+  const [activityVersion, setActivityVersion] = useState(0);
+  const authenticatedState = useMemo(() => stored.userId === userId ? stored.state : emptyAuthenticatedSubscriptionsState(), [stored, userId]);
+  const isSyncing = Boolean(userId && isAuthenticatedSyncActive(userId));
 
   useEffect(() => {
-    if (typeof window === 'undefined') {
-      return;
-    }
-
-    const syncOnlineState = () => {
-      setIsOnline(window.navigator.onLine);
-    };
-
-    syncOnlineState();
-    window.addEventListener('online', syncOnlineState);
-    window.addEventListener('offline', syncOnlineState);
+    const online = () => setIsOnline(navigator.onLine);
+    window.addEventListener('online', online);
+    window.addEventListener('offline', online);
     return () => {
-      window.removeEventListener('online', syncOnlineState);
-      window.removeEventListener('offline', syncOnlineState);
+      window.removeEventListener('online', online);
+      window.removeEventListener('offline', online);
     };
   }, []);
 
   useEffect(() => {
-    if (!userId) {
-      setAuthenticatedState(emptyAuthenticatedSubscriptionsState());
-      setIsInitialized(status !== 'loading');
+    currentUserRef.current = enabled ? userId : null;
+    if (!enabled || !userId) {
+      setStored({ userId: null, state: emptyAuthenticatedSubscriptionsState() });
+      setInitializedUser(null);
+      setStorageError(null);
       return;
     }
-
-    const syncFromStorage = () => {
-      setAuthenticatedState(readAuthenticatedSubscriptionsState(userId));
-      setIsInitialized(true);
+    const refresh = () => {
+      try {
+        setStored({ userId, state: readAuthenticatedSubscriptionsState(userId) });
+        setStorageError(null);
+      } catch (error) {
+        setStorageError(errorMessage(error));
+      }
+      setInitializedUser(userId);
     };
-
-    syncFromStorage();
-    window.addEventListener(AUTHENTICATED_SUBSCRIPTIONS_UPDATED_EVENT, syncFromStorage);
+    const activity = () => setActivityVersion((value) => value + 1);
+    refresh();
+    window.addEventListener(AUTHENTICATED_SUBSCRIPTIONS_UPDATED_EVENT, refresh);
+    window.addEventListener('storage', refresh);
+    window.addEventListener(AUTHENTICATED_SYNC_ACTIVITY_EVENT, activity);
     return () => {
-      window.removeEventListener(AUTHENTICATED_SUBSCRIPTIONS_UPDATED_EVENT, syncFromStorage);
+      if (currentUserRef.current === userId) currentUserRef.current = null;
+      window.removeEventListener(AUTHENTICATED_SUBSCRIPTIONS_UPDATED_EVENT, refresh);
+      window.removeEventListener('storage', refresh);
+      window.removeEventListener(AUTHENTICATED_SYNC_ACTIVITY_EVENT, activity);
     };
-  }, [status, userId]);
+  }, [enabled, userId]);
 
-  const shouldFetchServerList = Boolean(
-    userId
-    && isOnline
-    && authenticatedState.pendingOperations.length === 0
-    && !syncInFlightRef.current,
-  );
-
-  const { data, error, isLoading, isValidating } = useSWR(
-    shouldFetchServerList ? [...SUBSCRIPTION_KEY, userId] : null,
-    () => subscriptionApi.list(),
-    {
-      revalidateOnFocus: true,
+  const { error, isLoading, isValidating, mutate: refreshServerList } = useSWR(
+    enabled && isOnline ? ['subscriptions', 'all', userId] : null,
+    async () => {
+      if (!userId) return;
+      // A response is usable only against the local revision from which its request began.
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        const revision = readAuthenticatedSubscriptionsState(userId).revision ?? 0;
+        const controller = new AbortController();
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const request = subscriptionApi.list(userId, controller.signal);
+        const timeout = new Promise<never>((_, reject) => {
+          timer = setTimeout(() => { controller.abort(); reject(new Error('一覧の更新がタイムアウトしました。')); }, 15_000);
+        });
+        const response = await Promise.race([request, timeout]).finally(() => clearTimeout(timer));
+        if (currentUserRef.current !== userId) return;
+        const result = await withAuthenticatedStorageLock(() => reconcileAuthenticatedSubscriptionsFromServer(userId, response, revision));
+        if (result.accepted) return result.state.subscriptions;
+      }
+      return readAuthenticatedSubscriptionsState(userId).subscriptions;
     },
+    { revalidateOnFocus: true, errorRetryCount: 2, errorRetryInterval: 5_000 },
   );
-
-  useEffect(() => {
-    if (!userId || !data) {
-      return;
-    }
-
-    const stored = readAuthenticatedSubscriptionsState(userId);
-    if (stored.pendingOperations.length > 0) {
-      return;
-    }
-
-    const next = replaceAuthenticatedSubscriptionsFromServer(userId, data);
-    setAuthenticatedState(next);
-  }, [data, userId]);
 
   const syncNow = useCallback(async () => {
-    if (!userId || !isOnline || syncInFlightRef.current) {
-      return;
-    }
-
-    let workingState = readAuthenticatedSubscriptionsState(userId);
-    if (workingState.pendingOperations.length === 0) {
-      return;
-    }
-
-    syncInFlightRef.current = true;
-    setIsSyncing(true);
-    setAuthenticatedState(setAuthenticatedSyncError(userId, null));
-
+    if (!userId || !enabled || !navigator.onLine) return;
     try {
-      while (workingState.pendingOperations.length > 0) {
-        const operation = workingState.pendingOperations[0] as PendingSubscriptionOperation;
-
-        if (operation.type === 'create') {
-          const created = await subscriptionApi.create(operation.payload);
-          workingState = replaceAuthenticatedTemporaryId(userId, operation.targetId, created);
-          workingState = shiftAuthenticatedPendingOperation(userId);
-          continue;
-        }
-
-        if (operation.type === 'update') {
-          await subscriptionApi.update(operation.targetId, operation.payload);
-          workingState = shiftAuthenticatedPendingOperation(userId);
-          continue;
-        }
-
-        if (operation.type === 'delete') {
-          await subscriptionApi.delete(operation.targetId);
-          workingState = shiftAuthenticatedPendingOperation(userId);
-          continue;
-        }
-
-        const validItems = operation.items.filter((item) => !isTemporarySubscriptionId(item.id));
-        if (validItems.length > 0) {
-          await subscriptionApi.reorder({ items: validItems });
-        }
-        workingState = shiftAuthenticatedPendingOperation(userId);
-      }
-
-      const latest = await subscriptionApi.list();
-      replaceAuthenticatedSubscriptionsFromServer(userId, latest);
-      workingState = clearAuthenticatedPendingOperations(userId);
-      setAuthenticatedState(workingState);
-      await mutate((key) => Array.isArray(key) && key[0] === 'subscriptions');
-      await mutate('users/me');
-    } catch (syncError) {
-      const next = setAuthenticatedSyncError(userId, resolveErrorMessage(syncError));
-      setAuthenticatedState(next);
-    } finally {
-      syncInFlightRef.current = false;
-      setIsSyncing(false);
+      await syncAuthenticatedSubscriptions(userId, { manual: true, isCurrentUser: () => currentUserRef.current === userId });
+      if (currentUserRef.current === userId) await refreshServerList();
+    } catch (error) {
+      if (currentUserRef.current === userId) setStorageError(errorMessage(error));
     }
-  }, [isOnline, userId]);
+  }, [enabled, refreshServerList, userId]);
 
   useEffect(() => {
-    if (!userId || !isOnline || authenticatedState.pendingOperations.length === 0) {
+    if (!enabled || !userId || !isOnline || storageError || isSyncing || !authenticatedState.pendingOperations.length) return;
+    let delay: number | null;
+    try {
+      delay = nextAuthenticatedRetryDelay(userId);
+    } catch (error) {
+      setStorageError(errorMessage(error));
       return;
     }
+    if (delay === null) return;
+    const timer = setTimeout(() => {
+      void syncAuthenticatedSubscriptions(userId, { isCurrentUser: () => currentUserRef.current === userId })
+        .then(() => { if (currentUserRef.current === userId) void refreshServerList(); })
+        .catch((error) => { if (currentUserRef.current === userId) setStorageError(errorMessage(error)); });
+    }, delay);
+    return () => clearTimeout(timer);
+  }, [activityVersion, authenticatedState.pendingOperations, enabled, isOnline, isSyncing, refreshServerList, storageError, userId]);
 
-    void syncNow();
-  }, [authenticatedState.pendingOperations.length, isOnline, syncNow, userId]);
+  const currentSubscriptions = enabled ? authenticatedState.subscriptions : EMPTY_SUBSCRIPTIONS;
+  const filteredSubscriptions = useMemo(() => applySubscriptionFilters(currentSubscriptions, params ?? {}), [currentSubscriptions, params]);
+  const meta = useMemo<ListMeta | undefined>(() => userId ? ({
+    page: 1,
+    limit: Math.max(filteredSubscriptions.length, 1),
+    total: filteredSubscriptions.length,
+    totalPages: 1,
+    summary: buildSubscriptionSummary(currentSubscriptions),
+  }) : undefined, [currentSubscriptions, filteredSubscriptions.length, userId]);
 
-  const currentSubscriptions = useMemo(
-    () => (
-      authenticatedState.subscriptions.length > 0 || authenticatedState.pendingOperations.length > 0
-        ? authenticatedState.subscriptions
-        : (data ?? [])
-    ),
-    [authenticatedState.pendingOperations.length, authenticatedState.subscriptions, data],
-  );
-
-  const filteredSubscriptions = useMemo(
-    () => applySubscriptionFilters(currentSubscriptions, params ?? {}),
-    [currentSubscriptions, params],
-  );
-
-  const meta = useMemo<ListMeta | undefined>(() => {
-    const source = currentSubscriptions;
-    if (!userId && !data) {
-      return undefined;
+  const saveLocalChange = useCallback(async <T,>(change: () => T): Promise<T> => {
+    try {
+      const result = await withAuthenticatedStorageLock(change);
+      setStorageError(null);
+      return result;
+    } catch (error) {
+      setStorageError(errorMessage(error));
+      throw error;
     }
-
-    return {
-      page: 1,
-      limit: Math.max(filteredSubscriptions.length, 1),
-      total: filteredSubscriptions.length,
-      totalPages: 1,
-      summary: buildSubscriptionSummary(source),
-    };
-  }, [currentSubscriptions, data, filteredSubscriptions.length, userId]);
-
+  }, []);
+  const requireUser = useCallback(() => {
+    if (!userId || currentUserRef.current !== userId) throw new Error('ログイン状態が変わりました。もう一度お試しください。');
+    return userId;
+  }, [userId]);
   const create = useCallback(async (input: CreateTrackedSubscriptionInput): Promise<TrackedSubscription> => {
-    if (!userId) {
-      throw new Error('Missing authenticated user');
-    }
-
-    const { state, subscription } = queueAuthenticatedCreate(userId, input);
-    setAuthenticatedState(state);
-    if (isOnline) {
-      void syncNow();
-    }
+    const owner = requireUser();
+    const { state, subscription } = await saveLocalChange(() => queueAuthenticatedCreate(requireUser(), input));
+    setStored({ userId: owner, state });
     return subscription;
-  }, [isOnline, syncNow, userId]);
-
+  }, [requireUser, saveLocalChange]);
   const update = useCallback(async (id: string, input: UpdateTrackedSubscriptionInput): Promise<TrackedSubscription> => {
-    if (!userId) {
-      throw new Error('Missing authenticated user');
-    }
-
-    const state = queueAuthenticatedUpdate(userId, id, input);
-    setAuthenticatedState(state);
-    if (isOnline) {
-      void syncNow();
-    }
-
-    const updated = state.subscriptions.find((item) => item.id === id);
-    if (!updated) {
-      throw new Error('Updated subscription not found');
-    }
+    const owner = requireUser();
+    const state = await saveLocalChange(() => queueAuthenticatedUpdate(requireUser(), id, input));
+    setStored({ userId: owner, state });
+    const updated = state.subscriptions.find((item) => item.id === resolveAuthenticatedSubscriptionId(state, id));
+    if (!updated) throw new Error('変更対象が見つかりません。');
     return updated;
-  }, [isOnline, syncNow, userId]);
-
+  }, [requireUser, saveLocalChange]);
   const remove = useCallback(async (id: string): Promise<void> => {
-    if (!userId) {
-      throw new Error('Missing authenticated user');
-    }
-
-    const state = queueAuthenticatedDelete(userId, id);
-    setAuthenticatedState(state);
-    if (isOnline) {
-      void syncNow();
-    }
-  }, [isOnline, syncNow, userId]);
-
+    const owner = requireUser();
+    const state = await saveLocalChange(() => queueAuthenticatedDelete(requireUser(), id));
+    setStored({ userId: owner, state });
+  }, [requireUser, saveLocalChange]);
   const reorder = useCallback(async (draggedId: string, targetId: string): Promise<void> => {
-    if (!userId) {
-      throw new Error('Missing authenticated user');
-    }
-
-    const allSubscriptions = readAuthenticatedSubscriptionsState(userId).subscriptions;
-    const visible = applySubscriptionFilters(allSubscriptions, params ?? {});
-    if (visible.length === 0) {
-      return;
-    }
-
-    const reordered = reorderSubscriptionsWithHiddenItems(allSubscriptions, visible, draggedId, targetId);
-    const state = queueAuthenticatedReorder(userId, reordered);
-    setAuthenticatedState(state);
-    if (isOnline) {
-      void syncNow();
-    }
-  }, [isOnline, params, syncNow, userId]);
-
-  const shouldHideNetworkError = !isOnline && authenticatedState.subscriptions.length > 0;
-  const resolvedError = shouldHideNetworkError ? null : error;
+    const owner = requireUser();
+    const state = await saveLocalChange(() => {
+      requireUser();
+      const current = readAuthenticatedSubscriptionsState(owner);
+      const all = current.subscriptions;
+      const visible = applySubscriptionFilters(all, params ?? {});
+      const reordered = reorderSubscriptionsWithHiddenItems(all, visible, resolveAuthenticatedSubscriptionId(current, draggedId), resolveAuthenticatedSubscriptionId(current, targetId));
+      return queueAuthenticatedReorder(owner, reordered);
+    });
+    setStored({ userId: owner, state });
+  }, [params, requireUser, saveLocalChange]);
 
   return {
     subscriptions: filteredSubscriptions,
     meta,
-    isLoading: !isInitialized || (currentSubscriptions.length === 0 && isLoading),
+    isLoading: (enabled && initializedUser !== userId) || (currentSubscriptions.length === 0 && isLoading),
     isValidating,
-    error: resolvedError,
-    create,
-    update,
-    remove,
-    reorder,
-    syncState: buildSyncState(authenticatedState, isSyncing, isOnline),
+    error: currentSubscriptions.length ? null : error,
+    create, update, remove, reorder,
+    syncState: {
+      pendingCount: authenticatedState.pendingOperations.length,
+      isSyncing,
+      syncError: storageError ?? authenticatedState.migrationError ?? authenticatedState.syncError ?? (error ? errorMessage(error) : null)
+        ?? (!isSyncing && authenticatedState.pendingOperations.some((operation) => (operation.attemptCount ?? 0) >= AUTHENTICATED_AUTO_ATTEMPT_LIMIT)
+          ? '自動同期を中断しました。変更はこの端末に保存されています。同期を再試行してください。' : null),
+      lastSyncedAt: authenticatedState.lastSyncedAt,
+      isOfflineReady: currentSubscriptions.length > 0 || authenticatedState.pendingOperations.length > 0,
+      isOnline,
+    },
     syncNow,
   };
 }

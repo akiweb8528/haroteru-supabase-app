@@ -44,20 +44,9 @@ export function SubscriptionDashboard({ isGuest = false }: Props) {
   const serverHook = useSubscriptions(isGuest ? null : filters);
   const localHook = useLocalSubscriptions(filters);
   const { subscriptions, meta, isLoading, error, create, update, remove, reorder, syncState, syncNow } = isGuest ? localHook : serverHook;
-  const [recoveredFromOffline, setRecoveredFromOffline] = useState(false);
-  const prevIsOnlineRef = useRef(syncState.isOnline);
-  useEffect(() => {
-    if (!prevIsOnlineRef.current && syncState.isOnline && syncState.pendingCount > 0) {
-      setRecoveredFromOffline(true);
-    }
-    if (syncState.pendingCount === 0) {
-      setRecoveredFromOffline(false);
-    }
-    prevIsOnlineRef.current = syncState.isOnline;
-  }, [syncState.isOnline, syncState.pendingCount]);
   const summary = meta?.summary;
   const hasSubscriptions = subscriptions.length > 0;
-  const isMigrationLoading = !isGuest && status === 'authenticated' && hasPendingLocalMigration && !hasSubscriptions && !error;
+  const isMigrationLoading = !isGuest && status === 'authenticated' && hasPendingLocalMigration && !hasSubscriptions && !error && !syncState.syncError;
   const canReorder = (filters.sort ?? 'position') === 'position' && (filters.order ?? 'asc') === 'asc';
   const dashboardCopy = isGuest || taste === 'ossan'
     ? {
@@ -88,6 +77,9 @@ export function SubscriptionDashboard({ isGuest = false }: Props) {
   const authenticatedSyncingCopy = taste === 'simple'
     ? '保留していた変更を同期しています。'
     : '保留しとった変更を同期しとるで。';
+  const authenticatedPendingCopy = taste === 'simple'
+    ? `この端末に保存済み・未同期 ${syncState.pendingCount} 件`
+    : `この端末に保存しとるで・未同期 ${syncState.pendingCount} 件`;
   const authenticatedSyncErrorCopy = syncState.syncError ?? (taste === 'simple'
     ? '同期に失敗しました。通信が戻ってから再試行してください。'
     : '同期に失敗してもうた。通信が戻ってから再試行してや。');
@@ -165,21 +157,24 @@ export function SubscriptionDashboard({ isGuest = false }: Props) {
         </div>
       )}
 
-      {!isGuest && syncState.pendingCount > 0 && status === 'authenticated' && (!syncState.isOnline || recoveredFromOffline) && (
+      {!isGuest && syncState.pendingCount > 0 && status === 'authenticated' && !syncState.syncError && (
         <div className="mb-6 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-4 text-sm text-amber-900 dark:border-amber-900/40 dark:bg-amber-900/10 dark:text-amber-200">
-          <p>{syncState.isOnline ? authenticatedSyncingCopy : authenticatedOfflineCopy}</p>
+          <p role="status">{!syncState.isOnline ? authenticatedOfflineCopy : syncState.isSyncing ? authenticatedSyncingCopy : authenticatedPendingCopy}</p>
         </div>
       )}
 
       {!isGuest && syncState.syncError && (
         <div className="mb-6 rounded-2xl border border-red-200 bg-red-50 px-4 py-4 text-sm text-red-800 dark:border-red-900/40 dark:bg-red-900/10 dark:text-red-200">
-          <p>{authenticatedSyncErrorCopy}</p>
+          <p role="status">{authenticatedSyncErrorCopy}</p>
+          {syncState.pendingCount > 0 && <p className="mt-1">{authenticatedPendingCopy}</p>}
           <button
             type="button"
             onClick={() => {
+              if (hasPendingLocalMigration) requestLocalSubscriptionsMigration();
               void syncNow();
             }}
-            className="mt-2 font-semibold underline underline-offset-2"
+            disabled={syncState.isSyncing || !syncState.isOnline}
+            className="mt-2 font-semibold underline underline-offset-2 disabled:opacity-50"
           >
             同期を再試行する
           </button>

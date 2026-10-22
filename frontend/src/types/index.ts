@@ -40,6 +40,7 @@ export interface MeResponse {
 
 export interface TrackedSubscription {
   id: string;
+  createOperationId?: string;
   userId: string;
   name: string;
   amountYen: number;

@@ -7,6 +7,7 @@ import type {
   ReviewPriority,
 } from '@/types';
 import { createClient } from '@/lib/supabase/client';
+import { ApiError } from '@/shared/api/http-client';
 
 export type SubscriptionListParams = {
   search?: string;
@@ -28,6 +29,7 @@ function mapRow(row: Record<string, unknown>): TrackedSubscription {
   return {
     id: row.id as string,
     userId: row.user_id as string,
+    createOperationId: (row.create_operation_id as string | null | undefined) ?? undefined,
     name: row.name as string,
     amountYen: row.amount_yen as number,
     billingCycle: row.billing_cycle as BillingCycle,
@@ -42,116 +44,75 @@ function mapRow(row: Record<string, unknown>): TrackedSubscription {
   };
 }
 
+type AuthenticatedRequest = Awaited<ReturnType<typeof authenticatedRequest>>;
+
+async function authenticatedRequest(expectedUserId?: string, signal?: AbortSignal) {
+  const supabase = createClient();
+  const { data: { session }, error: sessionError } = await supabase.auth.getSession();
+  if (sessionError || !session || (expectedUserId && session.user.id !== expectedUserId)) {
+    throw new ApiError('ログイン状態が変わりました。変更はこの端末に保存されています。', 401, 'session_changed');
+  }
+  const { data: { user }, error } = await supabase.auth.getUser(session.access_token);
+  if (error || !user || user.id !== session.user.id || (expectedUserId && user.id !== expectedUserId)) {
+    throw new ApiError('ログイン状態が変わりました。変更はこの端末に保存されています。', 401, 'session_changed');
+  }
+  const timeout = AbortSignal.timeout(15_000);
+  const requestSignal = signal ? AbortSignal.any([signal, timeout]) : timeout;
+  requestSignal.throwIfAborted();
+  // Pin this request to the verified token even if another account signs in later.
+  return { supabase, userId: user.id, token: session.access_token, signal: requestSignal };
+}
+
+function requestError(error: { message: string; code?: string }, status?: number) {
+  const conflict = error.message.includes('operation_conflict');
+  const rejected = !conflict && ['22001', '22003', '22023', '22P02', '23502', '23503', '23505', '23514', 'P0002'].includes(error.code ?? '');
+  return new ApiError(error.message, conflict ? 409 : error.code === 'P0002' ? 404 : status ?? 0, conflict ? 'operation_conflict' : error.code ?? 'network_error', undefined, rejected);
+}
+
+async function applyOperation(request: AuthenticatedRequest, kind: string, id: string | null, payload: unknown, operationId?: string) {
+  const { data, error, status } = await request.supabase.rpc('apply_subscription_operation', {
+    operation_id: operationId ?? crypto.randomUUID(),
+    operation_kind: kind,
+    subscription_id: id,
+    payload,
+  }).setHeader('Authorization', `Bearer ${request.token}`).abortSignal(request.signal);
+  if (error) throw requestError(error, status);
+  return data;
+}
+
 export const subscriptionApi = {
-  async list(): Promise<TrackedSubscription[]> {
-    const supabase = createClient();
-    const { data, error } = await supabase
+  async list(expectedUserId?: string, signal?: AbortSignal): Promise<TrackedSubscription[]> {
+    const request = await authenticatedRequest(expectedUserId, signal);
+    const { data, error, status } = await request.supabase
       .from('tracked_subscriptions')
       .select('*')
+      .eq('user_id', request.userId)
       .order('position', { ascending: true })
       .order('created_at', { ascending: true })
-      .limit(1000);
-
-    if (error) throw new Error(error.message);
+      .limit(1000)
+      .setHeader('Authorization', `Bearer ${request.token}`)
+      .abortSignal(request.signal);
+    if (error) throw requestError(error, status);
     return (data ?? []).map(mapRow);
   },
 
-  async create(input: CreateTrackedSubscriptionInput): Promise<TrackedSubscription> {
-    const supabase = createClient();
-    const { data: { user } } = await supabase.auth.getUser();
-    if (!user) throw new Error('Not authenticated');
-
-    // Get the next position
-    const { data: maxRow } = await supabase
-      .from('tracked_subscriptions')
-      .select('position')
-      .eq('user_id', user.id)
-      .order('position', { ascending: false })
-      .limit(1)
-      .single();
-
-    const nextPosition = maxRow ? (maxRow.position as number) + 1 : 0;
-
-    const { data, error } = await supabase
-      .from('tracked_subscriptions')
-      .insert({
-        user_id: user.id,
-        name: input.name,
-        amount_yen: input.amountYen,
-        billing_cycle: input.billingCycle,
-        category: input.category ?? null,
-        review_priority: input.reviewPriority,
-        locked: input.locked ?? false,
-        billing_day: input.billingDay ?? null,
-        note: input.note ?? '',
-        position: nextPosition,
-      })
-      .select()
-      .single();
-
-    if (error) throw new Error(error.message);
-    return mapRow(data);
+  async create(input: CreateTrackedSubscriptionInput, operationId?: string, expectedUserId?: string, signal?: AbortSignal): Promise<TrackedSubscription> {
+    const request = await authenticatedRequest(expectedUserId, signal);
+    return mapRow(await applyOperation(request, 'create', null, input, operationId));
   },
 
-  async update(id: string, input: UpdateTrackedSubscriptionInput): Promise<TrackedSubscription> {
-    const supabase = createClient();
-    const updates: Record<string, unknown> = {};
-
-    if (input.name !== undefined) updates.name = input.name;
-    if (input.amountYen !== undefined) updates.amount_yen = input.amountYen;
-    if (input.billingCycle !== undefined) updates.billing_cycle = input.billingCycle;
-    if (input.clearCategory) {
-      updates.category = null;
-    } else if (input.category !== undefined) {
-      updates.category = input.category;
-    }
-    if (input.reviewPriority !== undefined) updates.review_priority = input.reviewPriority;
-    if (input.locked !== undefined) updates.locked = input.locked;
-    if (input.clearBillingDay) {
-      updates.billing_day = null;
-    } else if (input.billingDay !== undefined) {
-      updates.billing_day = input.billingDay;
-    }
-    if (input.note !== undefined) updates.note = input.note;
-
-    if (Object.keys(updates).length === 0) {
-      // No changes, just return the current row
-      const { data, error } = await supabase
-        .from('tracked_subscriptions')
-        .select()
-        .eq('id', id)
-        .single();
-      if (error) throw new Error(error.message);
-      return mapRow(data);
-    }
-
-    const { data, error } = await supabase
-      .from('tracked_subscriptions')
-      .update(updates)
-      .eq('id', id)
-      .select()
-      .single();
-
-    if (error) throw new Error(error.message);
-    return mapRow(data);
+  async update(id: string, input: UpdateTrackedSubscriptionInput, operationId?: string, expectedUserId?: string, signal?: AbortSignal): Promise<TrackedSubscription> {
+    const request = await authenticatedRequest(expectedUserId, signal);
+    return mapRow(await applyOperation(request, 'update', id, input, operationId));
   },
 
-  async delete(id: string): Promise<void> {
-    const supabase = createClient();
-    const { error } = await supabase
-      .from('tracked_subscriptions')
-      .delete()
-      .eq('id', id);
-
-    if (error) throw new Error(error.message);
+  async delete(id: string, operationId?: string, expectedUserId?: string, signal?: AbortSignal): Promise<void> {
+    const request = await authenticatedRequest(expectedUserId, signal);
+    await applyOperation(request, 'delete', id, {}, operationId);
   },
 
-  async reorder(input: ReorderSubscriptionsInput): Promise<void> {
-    const supabase = createClient();
-    const { error } = await supabase.rpc('reorder_subscriptions', {
-      items: input.items,
-    });
-
-    if (error) throw new Error(error.message);
+  async reorder(input: ReorderSubscriptionsInput, operationId?: string, expectedUserId?: string, signal?: AbortSignal): Promise<void> {
+    const request = await authenticatedRequest(expectedUserId, signal);
+    await applyOperation(request, 'reorder', null, input, operationId);
   },
 };

@@ -91,4 +91,15 @@ describe('SubscriptionList', () => {
       expect(onReorder).not.toHaveBeenCalled();
     });
   });
+  it('一覧更新が失敗しても保存済みのカードを表示し続ける', () => {
+    render(<SubscriptionList subscriptions={[makeSubscription('saved', 0)]} isLoading={false} error={new Error('network')} onUpdate={onUpdate} onDelete={onDelete} onReorder={onReorder} canReorder />);
+    expect(screen.getByText('Subscription saved')).toBeVisible();
+    expect(screen.queryByText('一覧を読み込めませんでした。')).not.toBeInTheDocument();
+  });
+
+  it('再取得中にも保存済みカードを操作できる', () => {
+    render(<SubscriptionList subscriptions={[makeSubscription('saved', 0)]} isLoading error={null} onUpdate={onUpdate} onDelete={onDelete} onReorder={onReorder} canReorder />);
+    expect(screen.getByText('Subscription saved')).toBeVisible();
+  });
+
 });

@@ -56,7 +56,7 @@ export function SubscriptionList({ subscriptions, isLoading, error, onUpdate, on
     }
   }, [dropTargetId, onReorder, resetDragState]);
 
-  if (isLoading) {
+  if (isLoading && subscriptions.length === 0) {
     return (
       <div className="space-y-3">
         {[...Array(4)].map((_, i) => <div key={i} className="h-32 animate-pulse rounded-2xl bg-gray-100 dark:bg-gray-800" />)}
@@ -64,7 +64,7 @@ export function SubscriptionList({ subscriptions, isLoading, error, onUpdate, on
     );
   }
 
-  if (error) {
+  if (error && subscriptions.length === 0) {
     const isOfflineError = error instanceof ApiError && error.code === 'offline';
     return (
       <div className="rounded-2xl border border-red-200 bg-red-50 px-4 py-8 text-center text-sm text-red-700 dark:border-red-900/30 dark:bg-red-900/10 dark:text-red-300">

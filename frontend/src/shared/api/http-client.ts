@@ -8,6 +8,7 @@ export class ApiError extends Error {
     public readonly status: number,
     public readonly code: string,
     public readonly upgradeUrl?: string,
+    public readonly definitivelyRejected = false,
   ) {
     super(message);
     this.name = 'ApiError';

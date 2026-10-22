@@ -40,3 +40,32 @@ export function hasLocalSubscriptions(): boolean {
 export function requestLocalSubscriptionsMigration(): void {
   window.dispatchEvent(new Event(LOCAL_SUBSCRIPTIONS_MIGRATION_REQUESTED_EVENT));
 }
+
+export function readLocalSubscriptionsForMigration(): TrackedSubscription[] {
+  try {
+    const raw = localStorage.getItem(LOCAL_SUBSCRIPTIONS_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed) || parsed.some((item) => !item || typeof item !== 'object' || typeof item.id !== 'string' || !item.id)) {
+      throw new Error('Invalid guest subscriptions');
+    }
+    return parsed as TrackedSubscription[];
+  } catch {
+    throw new Error('この端末の元データを読み込めません。保存内容を保護して移行を中断しました。');
+  }
+}
+
+export function removeMigratedLocalSubscriptions(copied: TrackedSubscription[]): void {
+  if (!copied.length) return;
+  const snapshots = new Set(copied.map((item) => JSON.stringify(item)));
+  const current = readLocalSubscriptionsForMigration();
+  const remaining = current.filter((item) => !snapshots.has(JSON.stringify(item)));
+  if (remaining.length === current.length) return;
+  try {
+    if (remaining.length) localStorage.setItem(LOCAL_SUBSCRIPTIONS_STORAGE_KEY, JSON.stringify(remaining));
+    else localStorage.removeItem(LOCAL_SUBSCRIPTIONS_STORAGE_KEY);
+  } catch {
+    throw new Error('移行先には保存しましたが、この端末の元データを整理できませんでした。再試行しても項目は重複しません。');
+  }
+  notifyLocalSubscriptionsUpdated();
+}

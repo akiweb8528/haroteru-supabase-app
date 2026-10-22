@@ -2,87 +2,84 @@
 
 import { useCallback, useEffect, useRef } from 'react';
 import { useSession } from '@/providers/SessionProvider';
-import { mutate } from 'swr';
 import type { TrackedSubscription } from '@/types';
-import { subscriptionApi } from '@/features/subscriptions/api/subscription-client';
+import { withAuthenticatedStorageLock } from '@/features/subscriptions/lib/authenticated-sync';
 import {
-  clearLocalSubscriptions,
+  queueAuthenticatedGuestImport,
+  readAuthenticatedSubscriptionsState,
+  setAuthenticatedMigrationError,
+} from '@/features/subscriptions/lib/authenticated-sync-storage';
+import {
   LOCAL_SUBSCRIPTIONS_MIGRATION_REQUESTED_EVENT,
-  readLocalSubscriptions,
-  writeLocalSubscriptions,
+  readLocalSubscriptionsForMigration,
+  removeMigratedLocalSubscriptions,
 } from '@/features/subscriptions/lib/local-storage';
 
+const migrationErrorPrefix = '端末データの移行を完了できませんでした。';
+
 export function SubscriptionMigrationHandler() {
-  const { status } = useSession();
-  const attemptedInitialMigration = useRef(false);
-  const isMigrating = useRef(false);
+  const { user, status } = useSession();
+  const userId = status === 'authenticated' ? user?.id ?? null : null;
+  const currentOwner = useRef(userId);
+  currentOwner.current = userId;
+  const attemptedOwners = useRef(new Set<string>());
+  const migratingOwners = useRef(new Set<string>());
+
+  useEffect(() => {
+    currentOwner.current = userId;
+    return () => { if (currentOwner.current === userId) currentOwner.current = null; };
+  }, [userId]);
 
   const migrateLocalSubscriptions = useCallback(async () => {
-    if (status !== 'authenticated' || isMigrating.current) return;
-
-    const subscriptions: TrackedSubscription[] = readLocalSubscriptions();
-    if (!subscriptions.length) {
-      clearLocalSubscriptions();
-      return;
-    }
-
-    isMigrating.current = true;
+    const owner = userId;
+    if (!owner || migratingOwners.current.has(owner)) return;
+    migratingOwners.current.add(owner);
     try {
-      const sorted = [...subscriptions].sort((a, b) => a.position - b.position);
-      const failedItems: TrackedSubscription[] = [];
-
-      for (const item of sorted) {
-        try {
-          await subscriptionApi.create({
-            name: item.name,
-            amountYen: item.amountYen,
-            billingCycle: item.billingCycle,
-            category: item.category,
-            reviewPriority: item.reviewPriority,
-            locked: item.locked,
-            billingDay: item.billingDay,
-            note: item.note,
-          });
-        } catch {
-          failedItems.push(item);
+      await withAuthenticatedStorageLock(() => {
+        if (currentOwner.current !== owner) return;
+        const source = readLocalSubscriptionsForMigration().sort((a, b) => a.position - b.position);
+        const copied: TrackedSubscription[] = [];
+        let failure: unknown;
+        for (const item of source) {
+          if (currentOwner.current !== owner) break;
+          try {
+            queueAuthenticatedGuestImport(owner, item);
+            copied.push(item);
+          } catch (error) {
+            failure = error;
+          }
         }
-      }
-
-      if (failedItems.length === 0) {
-        clearLocalSubscriptions();
-      } else {
-        writeLocalSubscriptions(failedItems);
-      }
-
-      if (failedItems.length !== sorted.length) {
-        await mutate((key) => Array.isArray(key) && key[0] === 'subscriptions');
-        await mutate('users/me');
-      }
+        removeMigratedLocalSubscriptions(copied);
+        if (failure) throw failure;
+        if (readAuthenticatedSubscriptionsState(owner).migrationError) {
+          setAuthenticatedMigrationError(owner, null);
+        }
+      });
     } catch (error) {
-      console.error('[SubscriptionMigrationHandler] Failed to finalize local migration', error);
+      const detail = error instanceof Error ? error.message : '元データはこの端末に残っています。';
+      console.error('[SubscriptionMigrationHandler] Failed to transfer guest subscriptions', error);
+      try {
+        await withAuthenticatedStorageLock(() => setAuthenticatedMigrationError(owner, `${migrationErrorPrefix}${detail}`));
+      } catch (storageError) {
+        console.error('[SubscriptionMigrationHandler] Failed to save migration status', storageError);
+      }
     } finally {
-      isMigrating.current = false;
+      migratingOwners.current.delete(owner);
     }
-  }, [status]);
+  }, [userId]);
 
   useEffect(() => {
-    if (status !== 'authenticated' || attemptedInitialMigration.current) return;
-    attemptedInitialMigration.current = true;
+    if (!userId || attemptedOwners.current.has(userId)) return;
+    attemptedOwners.current.add(userId);
     void migrateLocalSubscriptions();
-  }, [migrateLocalSubscriptions, status]);
+  }, [migrateLocalSubscriptions, userId]);
 
   useEffect(() => {
-    if (status !== 'authenticated') return;
-
-    const handleRetry = () => {
-      void migrateLocalSubscriptions();
-    };
-
+    if (!userId) return;
+    const handleRetry = () => { void migrateLocalSubscriptions(); };
     window.addEventListener(LOCAL_SUBSCRIPTIONS_MIGRATION_REQUESTED_EVENT, handleRetry);
-    return () => {
-      window.removeEventListener(LOCAL_SUBSCRIPTIONS_MIGRATION_REQUESTED_EVENT, handleRetry);
-    };
-  }, [migrateLocalSubscriptions, status]);
+    return () => window.removeEventListener(LOCAL_SUBSCRIPTIONS_MIGRATION_REQUESTED_EVENT, handleRetry);
+  }, [migrateLocalSubscriptions, userId]);
 
   return null;
 }
