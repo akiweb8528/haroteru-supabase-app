@@ -133,6 +133,24 @@ describe('SubscriptionMigrationHandler のキューへの引き渡し', () => {
     expect(mocks.create).not.toHaveBeenCalled();
   });
 
+  it('lock待機中にログアウトしても同ownerの再ログインで自動移行をやり直す', async () => {
+    localStorage.setItem(guestKey, JSON.stringify([item()]));
+    let release!: () => void;
+    mocks.lock.mockImplementationOnce((change: () => unknown) => new Promise<void>((resolve) => { release = () => { change(); resolve(); }; }));
+    const view = render(<SubscriptionMigrationHandler />);
+    mocks.session.mockReturnValue({ status: 'unauthenticated', data: null, user: null });
+    view.rerender(<SubscriptionMigrationHandler />);
+    await act(async () => release());
+    expect(readAuthenticatedSubscriptionsState('user-a').pendingOperations).toHaveLength(0);
+    mocks.session.mockReturnValue(session());
+    view.rerender(<SubscriptionMigrationHandler />);
+    await waitFor(() => expect(readAuthenticatedSubscriptionsState('user-a').pendingOperations).toHaveLength(1));
+    expect(localStorage.getItem(guestKey)).toBeNull();
+    view.rerender(<SubscriptionMigrationHandler />);
+    expect(readAuthenticatedSubscriptionsState('user-a').pendingOperations).toHaveLength(1);
+    expect(mocks.lock).toHaveBeenCalledTimes(2);
+  });
+
   it('別ownerで同じsourceを再importしない', async () => {
     const source = item();
     localStorage.setItem(guestKey, JSON.stringify([source]));

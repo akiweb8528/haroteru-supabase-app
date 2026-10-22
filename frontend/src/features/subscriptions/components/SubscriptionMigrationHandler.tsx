@@ -22,7 +22,7 @@ export function SubscriptionMigrationHandler() {
   const userId = status === 'authenticated' ? user?.id ?? null : null;
   const currentOwner = useRef(userId);
   currentOwner.current = userId;
-  const attemptedOwners = useRef(new Set<string>());
+  const lastAttemptedOwner = useRef<string | null>(null);
   const migratingOwners = useRef(new Set<string>());
 
   useEffect(() => {
@@ -69,9 +69,9 @@ export function SubscriptionMigrationHandler() {
   }, [userId]);
 
   useEffect(() => {
-    if (!userId || attemptedOwners.current.has(userId)) return;
-    attemptedOwners.current.add(userId);
-    void migrateLocalSubscriptions();
+    if (lastAttemptedOwner.current === userId) return;
+    lastAttemptedOwner.current = userId;
+    if (userId) void migrateLocalSubscriptions();
   }, [migrateLocalSubscriptions, userId]);
 
   useEffect(() => {
