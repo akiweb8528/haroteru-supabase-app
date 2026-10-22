@@ -180,6 +180,7 @@ frontend の公開前に、対象 Supabase プロジェクトへ `20261022133855
 GitHub Actions の CI は `.github/workflows/ci.yml` で管理しています。
 
 - 対象ブランチ: `main`
+- database: PostgreSQL 16 で全 migration、RPC / RLS、並列再送を検証
 - frontend（Node.js 24.22.1）: `npm ci`, `npm run lint`, `npm run type-check`, `npm test`, `npm run build`
 
 今回の Node.js 移行の実測結果と残確認は [検証記録](docs/node24-security-validation.md) を参照してください。
