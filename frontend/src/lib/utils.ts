@@ -63,23 +63,28 @@ export function resolveSupabaseServerUrl(value: string | undefined, fallback?: s
   }
 }
 
-export function sanitizeCallbackUrl(value: string | undefined, fallback = '/subscriptions'): string {
+function normalizeCallbackPath(value: string | undefined): string | undefined {
   const candidate = value?.trim();
-  if (!candidate) {
-    return fallback;
-  }
-
-  // Only allow in-app relative paths and reject protocol-relative values.
-  if (!candidate.startsWith('/') || candidate.startsWith('//') || candidate.includes('\\')) {
-    return fallback;
+  if (!candidate || !candidate.startsWith('/') || candidate.startsWith('//') || candidate.includes('\\')) {
+    return undefined;
   }
 
   try {
-    const url = new URL(candidate, 'http://localhost');
-    return `${url.pathname}${url.search}${url.hash}`;
+    const base = 'http://localhost';
+    const url = new URL(candidate, base);
+    const path = `${url.pathname}${url.search}${url.hash}`;
+    // Dot segments can turn an initially relative path into a protocol-relative URL.
+    if (url.origin !== base || !path.startsWith('/') || path.startsWith('//') || path.includes('\\')) {
+      return undefined;
+    }
+    return path;
   } catch {
-    return fallback;
+    return undefined;
   }
+}
+
+export function sanitizeCallbackUrl(value: string | undefined, fallback = '/subscriptions'): string {
+  return normalizeCallbackPath(value) ?? normalizeCallbackPath(fallback) ?? '/subscriptions';
 }
 
 export const reviewPriorityLabels: Record<string, string> = {

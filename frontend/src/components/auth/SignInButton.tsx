@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { createClient } from '@/lib/supabase/client';
-import { normalizeLoopbackOrigin } from '@/lib/utils';
+import { normalizeLoopbackOrigin, sanitizeCallbackUrl } from '@/lib/utils';
 
 interface Props {
   callbackUrl?: string;
@@ -19,13 +19,14 @@ const GoogleLogo = ({ className }: { className: string }) => (
 );
 
 export function SignInButton({ callbackUrl = '/subscriptions', compact = false }: Props) {
+  const safeCallbackUrl = sanitizeCallbackUrl(callbackUrl);
   const handleSignIn = () => {
     const siteOrigin = normalizeLoopbackOrigin(window.location.origin);
     const supabase = createClient();
     void supabase.auth.signInWithOAuth({
       provider: 'google',
       options: {
-        redirectTo: `${siteOrigin}/api/auth/callback?next=${encodeURIComponent(callbackUrl)}`,
+        redirectTo: `${siteOrigin}/api/auth/callback?next=${encodeURIComponent(safeCallbackUrl)}`,
         queryParams: {
           prompt: 'select_account',
         },
@@ -36,7 +37,7 @@ export function SignInButton({ callbackUrl = '/subscriptions', compact = false }
   if (compact) {
     return (
       <Link
-        href={`/auth/signin?callbackUrl=${encodeURIComponent(callbackUrl)}`}
+        href={`/auth/signin?callbackUrl=${encodeURIComponent(safeCallbackUrl)}`}
         className="flex items-center gap-2 rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm font-semibold text-gray-700 shadow-sm transition hover:bg-gray-50 hover:shadow-md active:scale-95"
       >
         <GoogleLogo className="h-4 w-4" />

@@ -138,6 +138,8 @@ Google OAuth を使う場合は、Supabase の Authentication > Providers > Goog
 - `Redirect URLs`: `http://localhost:3000/api/auth/callback`
 - `Authentication > Providers > Google`: `Enable sign in with Google` を ON
 
+OAuth の `callbackUrl` は、URL 正規化後も同じアプリの相対パスであることを検査します。`/.//evil.com` のように正規化で `//` 始まりになる入力は `/subscriptions` へ戻します。実際の Supabase URL Configuration と Google の設定は、デプロイ先で確認してください。
+
 ## デプロイ
 
 ### Frontend（Vercel）
