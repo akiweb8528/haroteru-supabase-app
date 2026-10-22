@@ -171,7 +171,9 @@ Vercel の Project Settings > Build and Deployment では、Root Directory が `
 
 サーバー側は利用者・操作 ID ごとの実行済み台帳と変更を同じトランザクションで保存し、再送には初回の結果を返します。同じ ID で別の内容を送る要求は拒否します。台帳は削除済み項目への遅延再送にも必要なため、自動保持期限を設けず、アカウント削除時に削除します。容量は成功操作数に比例します。台帳を手動削除すると再送保護が失われます。
 
-frontend の公開前に、対象 Supabase プロジェクトへ `20261022133855_authenticated_subscription_operations.sql` を適用してください。同期は新 RPC `apply_subscription_operation` を使用します。RPC が未配備でも直接 CRUD へ切り替えず、変更を端末に保持します。
+台帳は `anon` / `authenticated` からの直接の閲覧・INSERT・UPDATE・DELETE を禁止しています。公開 RPC は `SECURITY INVOKER` のまま、非公開 schema `subscription_sync_private` の処理を呼びます。処理関数の所有者はログイン・RLS 迂回・テーブル所有を持たない専用ロールで、必要な列の変更と台帳の SELECT / INSERT だけを許可します。`auth.uid()` の所有者確認と RLS を維持し、安全な `search_path` を固定しています。`subscription_sync_private` を PostgREST の公開 schema に追加しないでください。
+
+frontend の公開前に、対象 Supabase プロジェクトへ `20261022133855_authenticated_subscription_operations.sql` と後続の `20261022161132_restrict_subscription_operation_receipts.sql` を順番に適用してください。後続 migration は既存データ・台帳を保持して権限と関数だけを変更するため、先行 migration が適用済みでも履歴を書き換えません。同期は新 RPC `apply_subscription_operation` を使用します。RPC が未配備でも直接 CRUD へ切り替えず、変更を端末に保持します。
 
 検証範囲と移行時の限界は [認証・同期の検証記録](docs/auth-sync-validation.md) を参照してください。
 
@@ -180,7 +182,7 @@ frontend の公開前に、対象 Supabase プロジェクトへ `20261022133855
 GitHub Actions の CI は `.github/workflows/ci.yml` で管理しています。
 
 - 対象ブランチ: `main`
-- database: PostgreSQL 16 で全 migration、RPC / RLS、並列再送を検証
+- database: PostgreSQL 16 の非 superuser / CREATEROLE ロールで全 migration を適用し、既存台帳の保持、RPC / RLS、台帳への直接書込拒否、一時オブジェクトによる名前の横取り、各操作の並列 8 再送を検証
 - frontend（Node.js 24.22.1）: `npm ci`, `npm run lint`, `npm run type-check`, `npm test`, `npm run build`
 
 今回の Node.js 移行の実測結果と残確認は [検証記録](docs/node24-security-validation.md) を参照してください。

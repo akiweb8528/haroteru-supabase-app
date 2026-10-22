@@ -36,15 +36,26 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      - name: Apply migrations against isolated Auth fixture
+      - name: Apply migrations as a non-superuser against isolated Auth fixture
         run: |
-          psql -v ON_ERROR_STOP=1 -f supabase/tests/auth-fixture.sql
+          psql -v ON_ERROR_STOP=1 -c "CREATE ROLE haroteru_migration_runner LOGIN CREATEROLE NOINHERIT NOBYPASSRLS NOSUPERUSER NOCREATEDB PASSWORD 'haroteru_test'"
+          createdb --owner=haroteru_migration_runner haroteru_migration_runner
+          export PGDATABASE=haroteru_migration_runner
+          echo "PGDATABASE=$PGDATABASE" >> "$GITHUB_ENV"
+          PGUSER=haroteru_migration_runner psql -v ON_ERROR_STOP=1 -f supabase/tests/auth-fixture.sql
           for migration in supabase/migrations/*.sql; do
-            psql -v ON_ERROR_STOP=1 -f "$migration"
+            if [[ "$migration" == *restrict_subscription_operation_receipts.sql ]]; then
+              psql -v ON_ERROR_STOP=1 -f supabase/tests/receipt-upgrade-fixture.sql
+            fi
+            PGUSER=haroteru_migration_runner psql -v ON_ERROR_STOP=1 --single-transaction -f "$migration"
           done
+      - name: Verify existing data and receipts survive the privilege migration
+        run: psql -v ON_ERROR_STOP=1 -f supabase/tests/receipt-upgrade-regression.sql
       - name: Verify operation receipts and user isolation
         run: psql -v ON_ERROR_STOP=1 -f supabase/tests/subscription_operation_receipts.sql
-      - name: Verify concurrent retries create a single row
+      - name: Verify private dispatcher and legacy RPC ignore temporary shadow objects
+        run: psql -v ON_ERROR_STOP=1 -f supabase/tests/subscription_operation_security.sql
+      - name: Verify concurrent retries apply each operation once
         run: bash supabase/tests/concurrent-operation-receipts.sh
   frontend:
     name: Frontend Check

@@ -34,7 +34,7 @@ describe('subscription operation identity and ownership', () => {
 
   it.each([
     ['23514', 'constraint failure', 400, true],
-    ['P0002', 'subscription_not_found', 404, true],
+    ['P0002', 'subscription_not_found', 500, true],
     ['22023', 'operation_conflict', 400, false],
     ['PGRST202', 'function missing', 404, false],
     ['', 'network timeout', 0, false],
