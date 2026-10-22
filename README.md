@@ -64,17 +64,43 @@ https://github.com/akiweb8528/haroteru-app
 
 ## 起動
 
-推奨の開発環境は Dev Container です。
+推奨の開発環境は Dev Container です。Node.js は **24.22.1** を基準に揃えています。Docker の builder / runner / 開発用イメージは `node:24.22.1-alpine`、Dev Container の Node feature と CI は `24.22.1` 固定です。`frontend/package.json` は Node.js `>=24.22.1 <25` を要求します。
 
-1. Docker Desktop を起動する
-2. VS Code で `Dev Containers: Reopen in Container` を実行する
-3. 起動後は `.devcontainer/post-start.sh` が自動実行され、`.env.local` を `.env` に同期したうえで frontend に加えて `http://127.0.0.1:54321` のローカル Supabase Auth / DB も立ち上がる
-4. マイグレーションは `npx supabase db push --local` まで自動適用される
+既存の Dev Container は再作成し、`node --version` が `v24.22.1` であることを確認してください。ホストで実行する場合はリポジトリ直下の `.nvmrc` を読み、fnm なら `fnm install && fnm use`、nvm なら `nvm install && nvm use` で同じバージョンを使用します。
+
+```bash
+nvm install
+nvm use
+cd frontend
+npm ci
+npm run lint
+npm run type-check
+npm test
+npm run build
+```
+
+1. `.env.example` から `.env.local` を作成し、ローカル Supabase 用の値を設定する
+2. Docker Desktop を起動する
+3. VS Code で `Dev Containers: Reopen in Container` を実行する
+4. 起動後は `.devcontainer/post-start.sh` が自動実行され、`.env.local` を `.env` に同期したうえで frontend に加えて `http://127.0.0.1:54321` のローカル Supabase Auth / DB も立ち上がる
+5. マイグレーションは `npx supabase db push --local` まで自動適用される
 
 主な起動先:
 
 - Frontend: `http://localhost:3000`
 - Supabase API / Auth: `http://127.0.0.1:54321`
+
+### Docker と環境変数
+
+`docker compose build frontend` はリポジトリ直下を build context にして standalone 出力を作成します。`.dockerignore` でホストの依存・ビルド出力・環境変数ファイルを除外し、`.env.local` は起動時に読み取り専用でマウントします。ファイルを事前に作成してください。
+
+```bash
+docker compose build frontend
+docker compose up -d frontend
+docker compose exec frontend node --version
+```
+
+`.env.local` の変更後は `docker compose restart frontend` で entrypoint が読み直します。公開設定は `/api/runtime-config` から配信されるため、ブラウザを再読み込みして反映を確認してください。開発用の hot reload は `docker-compose.override.sample.yml` を `docker-compose.override.yml` にコピーして使用します。
 
 ## Supabase セットアップ
 
@@ -124,7 +150,9 @@ frontend は Vercel にデプロイします。Vercel 側で設定する主な e
 - `NEXT_PUBLIC_GA_MEASUREMENT_ID`: Google Analytics の Measurement ID（任意）
 - `NEXT_PUBLIC_APP_ENV`: `production`
 
-このリポジトリでは、`main` ブランチへの push をそのまま Vercel 本番デプロイに使う前提です。
+Vercel の Project Settings > Build and Deployment では、Root Directory が `frontend`（engine 宣言のある `package.json`）を参照することを確認し、Node.js Version も **24.x** に揃え、新規デプロイのビルドログで **24.22.1 以上の 24 系**が実際に選ばれたことを確認してください。Vercel が提供するパッチはプラットフォーム側で管理されます。リポジトリの更新だけで既存デプロイの実行時が置き換わるとは限らないため、設定確認後の再デプロイと本番 URL / OAuth callback の動作確認が必要です。
+
+このリポジトリでは、`main` ブランチへの反映を Vercel 本番デプロイに使う前提です。
 
 - 確認先: `https://haroteru-supabase-app.vercel.app`
 - OAuth の `Site URL` / `Redirect URLs` もこの URL に揃えてください
@@ -134,15 +162,18 @@ frontend は Vercel にデプロイします。Vercel 側で設定する主な e
 GitHub Actions の CI は `.github/workflows/ci.yml` で管理しています。
 
 - 対象ブランチ: `main`
-- frontend: `npm ci`, `npm run type-check`, `npm test`
+- frontend（Node.js 24.22.1）: `npm ci`, `npm run lint`, `npm run type-check`, `npm test`, `npm run build`
+
+今回の Node.js 移行の実測結果と残確認は [検証記録](docs/node24-security-validation.md) を参照してください。
 
 CD は Vercel の Git 連携を使い、`main` への反映後に本番 URL が更新される想定です。
 
 基本運用:
 
 1. ローカルで確認する
-2. `main` に push する
-3. Vercel で `https://haroteru-supabase-app.vercel.app` を確認する
+2. 作業ブランチを push し、`main` を base とする PR でレビューする
+3. PR の merge 後に Vercel のデプロイ結果を確認する
+4. Vercel で `https://haroteru-supabase-app.vercel.app` とログイン・同期を確認する
 
 ## フロントエディタエラー解消
 
@@ -151,7 +182,7 @@ CD は Vercel の Git 連携を使い、`main` への反映後に本番 URL が�
 依存関係を入れ直したい場合だけ、Dev Container 内で次を実行してください。
 
 ```bash
-cd frontend && npm install
+cd frontend && npm ci
 ```
 
 ## ライセンス

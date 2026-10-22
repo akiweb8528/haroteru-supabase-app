@@ -3,7 +3,7 @@
   "image": "mcr.microsoft.com/devcontainers/base:ubuntu-24.04",
   "features": {
     "ghcr.io/devcontainers/features/node:1": {
-      "version": "20"
+      "version": "24.22.1"
     },
     "ghcr.io/devcontainers/features/github-cli:1": {
       "version": "latest"
@@ -17,7 +17,7 @@
     "ANTHROPIC_API_KEY": "${localEnv:ANTHROPIC_API_KEY}"
   },
   "forwardPorts": [3000, 54321, 54322, 54323, 54324],
-  "postStartCommand": ".devcontainer/post-start.sh",
+  "postStartCommand": "bash .devcontainer/post-start.sh",
   "customizations": {
     "vscode": {
       "extensions": [

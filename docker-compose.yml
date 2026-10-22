@@ -5,6 +5,13 @@ services:
       dockerfile: frontend/Dockerfile
     ports:
       - "3000:3000"
+    volumes:
+      - type: bind
+        source: ./.env.local
+        target: /app/.env.local
+        read_only: true
+        bind:
+          create_host_path: false
     extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: on-failure

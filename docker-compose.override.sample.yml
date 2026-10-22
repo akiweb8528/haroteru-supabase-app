@@ -2,7 +2,7 @@
 services:
   frontend:
     build:
-      dockerfile: Dockerfile.dev
+      dockerfile: frontend/Dockerfile.dev
     volumes:
       - ./.env.local:/app/.env.local:ro
       - ./frontend:/app
