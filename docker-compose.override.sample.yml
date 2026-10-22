@@ -1,0 +1,19 @@
+# Development overrides — hot reload and exposed ports
+services:
+  frontend:
+    build:
+      dockerfile: Dockerfile.dev
+    volumes:
+      - ./.env.local:/app/.env.local:ro
+      - ./frontend:/app
+      - /app/node_modules
+      - /app/.next
+    environment:
+      - NODE_ENV=development
+      - WATCHPACK_POLLING=true
+      - CHOKIDAR_USEPOLLING=true
+    command: npm run dev
+
+volumes:
+  go_mod_cache:
+  go_build_cache:
