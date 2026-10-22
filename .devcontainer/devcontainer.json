@@ -1,0 +1,31 @@
+{
+  "name": "haroteru-app",
+  "image": "mcr.microsoft.com/devcontainers/base:ubuntu-24.04",
+  "features": {
+    "ghcr.io/devcontainers/features/node:1": {
+      "version": "24.22.1"
+    },
+    "ghcr.io/devcontainers/features/github-cli:1": {
+      "version": "latest"
+    },
+    "ghcr.io/devcontainers/features/docker-in-docker:2": {
+      "version": "latest",
+      "moby": true
+    }
+  },
+  "containerEnv": {
+    "ANTHROPIC_API_KEY": "${localEnv:ANTHROPIC_API_KEY}"
+  },
+  "forwardPorts": [3000, 54321, 54322, 54323, 54324],
+  "postStartCommand": "bash .devcontainer/post-start.sh",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "dbaeumer.vscode-eslint",
+        "bradlc.vscode-tailwindcss",
+        "anthropic.claude-code"
+      ]
+    }
+  },
+  "remoteUser": "vscode"
+}

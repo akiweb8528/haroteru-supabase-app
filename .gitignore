@@ -1,0 +1,46 @@
+# dependencies
+/frontend/node_modules
+
+# test
+/coverage
+
+# production
+/build
+/frontend/.next/
+/frontend/tsconfig.tsbuildinfo
+/frontend/public/sw.js
+/frontend/public/sw.js.map
+
+# env
+.env
+.env.local
+.env.*.local
+
+# log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# tmp
+tmp
+
+# etc
+docker-compose.override.yml
+
+# editor / os
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# local build tools
+.vercel/
+.turbo/
+
+# serena
+/.serena/cache/
+/.serena/memories/
+/.serena/project.local.yml
+
+# claude
+.claude/settings.local.json
